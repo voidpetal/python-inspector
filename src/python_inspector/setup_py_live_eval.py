@@ -24,6 +24,7 @@ import mock
 import setuptools
 from commoncode.command import pushd
 from packvers.requirements import Requirement
+from python_inspector.pybuilder_support import get_pybuilder_dependencies, is_pybuilder_project
 
 
 def minver_error(pkg_name):
@@ -43,9 +44,14 @@ def build_pkg_name(pkg):
 
 
 def iter_requirements(level, extras, setup_file):
-    """Iterate over requirements."""
     from pathlib import Path
+    """Iterate over requirements.
 
+    Enhanced with PyBuilder support: if a sibling build.py is detected as a
+    PyBuilder project we avoid executing setup.py (which may be generated and
+    not support extra CLI flags) and instead parse dependencies directly from
+    build.py.
+    """
     setup_file = str(Path(setup_file).absolute())
     result = dict()
     requires = []
@@ -96,13 +102,18 @@ def iter_requirements(level, extras, setup_file):
                     if name in asnames.keys():
                         name = asnames[name]
                     imports.append(name)
-            setup_providers = [i for i in imports if i in ["distutils.core", "setuptools"]]
+            setup_providers = [i for i in imports if i in ["distutils.core", "setuptools", "pybuilder"]]
             if len(setup_providers) == 0:
-                print(
-                    f"Warning: unable to recognize setup provider in {setup_file}: "
-                    "defaulting to 'distutils.core'."
-                )
-                setup_provider = "distutils.core"
+                # PyBuilder detection via build.py heuristic
+                build_py = Path(setup_file).parent / "build.py"
+                if build_py.is_file() and is_pybuilder_project(build_py.read_text(errors="ignore")):
+                    setup_provider = "pybuilder"
+                else:
+                    print(
+                        f"Warning: unable to recognize setup provider in {setup_file}: "
+                        "defaulting to 'distutils.core'."
+                    )
+                    setup_provider = "distutils.core"
             elif len(setup_providers) == 1:
                 setup_provider = setup_providers[0]
             else:
@@ -111,15 +122,24 @@ def iter_requirements(level, extras, setup_file):
                     "defaulting to 'distutils.core'."
                 )
                 setup_provider = "distutils.core"
-            with mock.patch.object(eval(setup_provider), "setup") as mock_setup:
-                sys.path.append(os.path.dirname(setup_file))
-                g = {"__file__": setup_file, "__name__": "__main__"}
-                exec(file_contents, g)
-            sys.path.pop()
+            if setup_provider == "pybuilder":
+                # Parse dependencies from build.py directly, do not execute setup.py
+                build_py = Path(setup_file).parent / "build.py"
+                pyb_deps = list(get_pybuilder_dependencies(build_py))
+                mock_args = ()
+                mock_kwargs = {"install_requires": [d.extracted_requirement for d in pyb_deps]}
+            else:
+                with mock.patch.object(eval(setup_provider), "setup") as mock_setup:
+                    sys.path.append(os.path.dirname(setup_file))
+                    g = {"__file__": setup_file, "__name__": "__main__"}
+                    exec(file_contents, g)
+                sys.path.pop()
+                mock_args, mock_kwargs = mock_setup.call_args
             # removing the assertion `assert g["setup"]`` since this is not true for all cases
             # for example when setuptools.setup() is called instead of setup()
-
-    mock_args, mock_kwargs = mock_setup.call_args
+    # mock_kwargs already set for pybuilder path
+    if 'mock_kwargs' not in locals():
+        mock_args, mock_kwargs = mock_setup.call_args
     install_requires = mock_kwargs.get("install_requires", install_requires)
     install_requires = [req for req in install_requires if req]
 

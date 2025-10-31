@@ -10,6 +10,12 @@ python-inspector - inspect Python package dependencies and metadata
 - parse various requirements.txt files and setup.py files as input
   for resolving dependencies.
 
+- parse PyBuilder ``build.py`` scripts to extract declared dependencies without
+    executing generated setup.py files (new in upcoming release). This avoids
+    issues with PyBuilder-generated setup.py not supporting custom flags and
+    provides safe AST-based extraction of ``project.depends_on`` and related
+    calls.
+
 - parse various manifests and packages files such as
   Pipfile, pyproject.toml, poetry.lock and setup.cfg and legacy and
   current metadata file formats for eggs, wheels and sdist. These
@@ -68,6 +74,22 @@ When in the virtual environment, run python-inspector from that clone::
 Run tests::
 
     make test
+
+PyBuilder projects
+--------------------
+
+If you need to resolve dependencies for a PyBuilder-based project simply pass
+its generated ``setup.py`` (after a PyBuilder build) or the requirements file
+as usual. python-inspector will detect a sibling ``build.py`` and extract
+dependencies directly from the ``project.depends_on`` calls. No special flags
+are required. Example::
+
+    pyb package
+    python-inspector --python-version 311 --operating-system linux --setup-py target/dist/yourproj-*/setup.py --json -
+
+On first run PyBuilder may create virtual environments; python-inspector now
+skips unsafe flag injection to the generated setup.py to prevent errors like
+``error: option --python-version not recognized``.
 
 Run code checks::
 

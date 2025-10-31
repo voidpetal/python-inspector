@@ -44,6 +44,8 @@ from python_inspector import pyinspector_settings as settings
 from python_inspector import utils_pypi
 from python_inspector.error import NoVersionsFound
 from python_inspector.setup_py_live_eval import iter_requirements
+from python_inspector.pybuilder_support import get_pybuilder_dependencies, is_pybuilder_project
+from pathlib import Path
 from python_inspector.utils import Candidate
 from python_inspector.utils import contain_string
 from python_inspector.utils import get_response_async
@@ -306,6 +308,20 @@ def get_requirements_from_python_manifest(
             sdist_location=sdist_location,
         )
     )
+    # PyBuilder secure path support: if build.py is present, extract deps via AST without executing code.
+    if not requirements:
+        build_py = os.path.join(sdist_location, 'build.py')
+        if os.path.exists(build_py):
+            try:
+                with open(build_py) as bpf:
+                    build_text = bpf.read()
+                if is_pybuilder_project(build_text):
+                    pyb_deps = list(get_pybuilder_dependencies(Path(build_py)))
+                    if pyb_deps:
+                        return [Requirement(d.extracted_requirement) for d in pyb_deps]
+            except Exception:
+                # be silent, fall back to other mechanisms
+                pass
     if requirements:
         yield from requirements
 
