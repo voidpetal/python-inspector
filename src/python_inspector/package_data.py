@@ -9,9 +9,11 @@
 # See https://aboutcode.org for more information about nexB OSS projects.
 #
 
+import posixpath
 from typing import Dict
 from typing import List
 from typing import Optional
+from urllib.parse import urlparse
 
 from packageurl import PackageURL
 
@@ -24,6 +26,43 @@ from python_inspector import utils_pypi
 from python_inspector.resolution import get_python_version_from_env_tag
 from python_inspector.utils_pypi import Environment
 from python_inspector.utils_pypi import PypiSimpleRepository
+
+
+def get_file_match_key(url: str, sha256: Optional[str] = None) -> tuple:
+    """
+    Extract a match key (filename, sha256) for comparing distribution files.
+
+    This universal approach works across all PyPI-compatible repositories regardless of
+    URL path structure, because:
+    - Filenames are standardized by PEP 427/491
+    - SHA256 hashes are immutable (same file = same hash)
+    - URL paths vary by implementation (PyPI.org, Artifactory, etc.)
+
+    Args:
+        url: The download URL
+        sha256: Optional SHA256 hash (if not in URL fragment)
+
+    Returns:
+        Tuple of (filename, sha256_hash)
+
+    Example:
+        https://host/path/file-1.0-py3.whl#sha256=abc123 -> ('file-1.0-py3.whl', 'abc123')
+        https://host/path/file-1.0.tar.gz -> ('file-1.0.tar.gz', None)
+
+    """
+    import re
+
+    # Extract filename from URL (before any # fragment)
+    parsed = urlparse(url)
+    filename = posixpath.basename(parsed.path)
+
+    # Try to extract SHA256 from URL fragment if not provided
+    if not sha256 and parsed.fragment:
+        hash_match = re.search(r"sha256=([a-f0-9]{64})", parsed.fragment)
+        if hash_match:
+            sha256 = hash_match.group(1)
+
+    return (filename, sha256)
 
 
 async def get_pypi_data_from_purl(
@@ -43,7 +82,15 @@ async def get_pypi_data_from_purl(
     version = parsed_purl.version
     if not version:
         raise Exception("Version is not specified in the purl")
-    base_path = "https://pypi.org/pypi"
+
+    # Derive base URL from repos if available, otherwise fallback to PyPI.org
+    if repos:
+        # Convert to list if needed and use first repo's index_url
+        repos_list = list(repos) if not isinstance(repos, list) else repos
+        base_path = repos_list[0].index_url.replace("/simple", "/pypi")
+    else:
+        base_path = "https://pypi.org/pypi"
+
     api_url = f"{base_path}/{name}/{version}/json"
 
     from python_inspector.utils import get_response_async
@@ -83,14 +130,34 @@ async def get_pypi_data_from_purl(
         if wheel_url:
             valid_distribution_urls.insert(0, wheel_url)
 
-    urls = {url.get("url"): url for url in response.get("urls") or []}
-    # iterate over the valid distribution urls and return the first
-    # one that is matching.
+    # Build a dict indexed by filename for universal matching across repositories
+    # Match by filename since /simple endpoint URLs and JSON API URLs may have different paths
+    # Filenames are standardized (PEP 427/491) and unique per package version
+    from urllib.parse import urljoin
+
+    urls_by_filename = {}
+    for url_entry in response.get("urls") or []:
+        url = url_entry.get("url")
+        if url:
+            # Resolve relative URLs (from Artifactory) to absolute URLs
+            absolute_url = urljoin(api_url, url)
+
+            # Extract filename for matching
+            parsed = urlparse(absolute_url)
+            filename = posixpath.basename(parsed.path)
+
+            urls_by_filename[filename] = url_entry
+
+    # Iterate over valid distribution URLs and match by filename
     for dist_url in valid_distribution_urls:
-        if dist_url not in urls:
+        # Extract filename from distribution URL
+        parsed = urlparse(dist_url)
+        filename = posixpath.basename(parsed.path)
+
+        if filename not in urls_by_filename:
             continue
 
-        url_data = urls.get(dist_url)
+        url_data = urls_by_filename[filename]
         digests = url_data.get("digests") or {}
 
         return PackageData(
